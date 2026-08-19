@@ -83,6 +83,7 @@ const EmailCuentaSchema = new mongoose.Schema({
     smtpTLS:       { type: Boolean, default: true },
     activa:        { type: Boolean, default: true },
     creadaEn:      { type: Date, default: Date.now },
+    userId:        { type: String, default: 'global' },
 });
 
 const EmailCuenta = mongoose.model('EmailCuenta', EmailCuentaSchema);
@@ -302,7 +303,8 @@ function obtenerCuerpoCorreo(imap, carpeta, uid) {
 // GET /api/email/cuentas — listar todas
 app.get('/api/email/cuentas', async (req, res) => {
     try {
-        const cuentas = await EmailCuenta.find().select('-password').lean();
+        const userId = req.headers['x-user-id'] || 'global';
+        const cuentas = await EmailCuenta.find({ userId }).select('-password').lean();
         res.json({ ok: true, cuentas });
     } catch(e) {
         res.status(500).json({ ok: false, error: e.message });
@@ -317,6 +319,7 @@ app.post('/api/email/cuentas', async (req, res) => {
             return res.status(400).json({ ok: false, error: 'nombre, email y password son requeridos' });
         }
         const cuenta = new EmailCuenta({
+            userId: req.headers['x-user-id'] || 'global',
             nombre,
             email,
             password,
