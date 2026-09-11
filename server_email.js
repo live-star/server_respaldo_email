@@ -88,6 +88,14 @@ const EmailCuentaSchema = new mongoose.Schema({
 
 const EmailCuenta = mongoose.model('EmailCuenta', EmailCuentaSchema);
 
+const EmailDirectorioSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true },
+    frecuencia: { type: Number, default: 1 },
+    ultimoUso: { type: Date, default: Date.now }
+});
+const EmailDirectorio = mongoose.model('EmailDirectorio', EmailDirectorioSchema);
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS — IMAP
 // ─────────────────────────────────────────────────────────────────────────────
@@ -482,6 +490,17 @@ app.delete('/api/email/correo/:id/:uid', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // POST /api/email/enviar
+
+// GET /api/email/directorio - obtener contactos sugeridos
+app.get('/api/email/directorio', async (req, res) => {
+    try {
+        const directorio = await EmailDirectorio.find().sort({ frecuencia: -1, ultimoUso: -1 }).limit(100).lean();
+        res.json({ ok: true, contactos: directorio.map(d => d.email) });
+    } catch(e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
 app.post('/api/email/enviar', async (req, res) => {
     try {
         const { cuentaId, para, cc, bcc, asunto, html, texto, adjuntos } = req.body;
@@ -497,6 +516,9 @@ app.post('/api/email/enviar', async (req, res) => {
             port: cuenta.smtpPort,
             secure: cuenta.smtpPort === 465,
             auth: { user: cuenta.email, pass: cuenta.password },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 15000,
             tls: { rejectUnauthorized: false },
         });
 
@@ -518,6 +540,63 @@ app.post('/api/email/enviar', async (req, res) => {
             attachments: attachments.length > 0 ? attachments : undefined,
         });
 
+        
+        function extraerCorreos(str) {
+            if (!str) return [];
+            return str.split(',').map(s => s.trim()).filter(s => s.includes('@'));
+        }
+        const todos = [...extraerCorreos(para), ...extraerCorreos(cc), ...extraerCorreos(bcc)];
+        const unicos = [...new Set(todos)];
+        unicos.forEach(emailAddr => {
+            EmailDirectorio.findOneAndUpdate(
+                { email: emailAddr.toLowerCase() },
+                { $inc: { frecuencia: 1 }, $set: { ultimoUso: new Date() } },
+                { upsert: true }
+            ).catch(err => console.error('Error actualizando directorio:', err));
+        });
+        
+        
+        // Generar el mensaje crudo para guardarlo en la carpeta de Enviados (IMAP)
+        try {
+            const rawTransporter = nodemailer.createTransport({ streamTransport: true, buffer: true });
+            const rawInfo = await rawTransporter.sendMail({
+                from: `"${cuenta.nombre}" <${cuenta.email}>`,
+                to: para,
+                cc: cc || undefined,
+                bcc: bcc || undefined,
+                subject: asunto,
+                html: html || undefined,
+                text: texto || undefined,
+                attachments: attachments.length > 0 ? attachments : undefined,
+            });
+            const rawMessage = rawInfo.message;
+            
+            const imap = await abrirImap({
+                email: cuenta.email,
+                password: cuenta.password,
+                imapHost: cuenta.imapHost || 'correo.naisata.com',
+                imapPort: cuenta.imapPort || 993,
+                imapTLS: cuenta.imapTLS !== false
+            });
+            
+            // Intentar guardarlo en la carpeta Sent, INBOX.Sent o Enviados
+            imap.append(rawMessage, { mailbox: 'Sent', flags: ['\\Seen'] }, (err) => {
+                if (err) {
+                    imap.append(rawMessage, { mailbox: 'Enviados', flags: ['\\Seen'] }, (err2) => {
+                        if (err2) {
+                            imap.append(rawMessage, { mailbox: 'INBOX.Sent', flags: ['\\Seen'] }, () => imap.end());
+                        } else {
+                            imap.end();
+                        }
+                    });
+                } else {
+                    imap.end();
+                }
+            });
+        } catch(imapErr) {
+            console.error('Error guardando en IMAP Enviados:', imapErr);
+        }
+        
         res.json({ ok: true, mensaje: 'Correo enviado exitosamente' });
     } catch(e) {
         res.status(500).json({ ok: false, error: e.message });
@@ -551,6 +630,16 @@ function publicDocument(doc) {
     return value;
 }
 
+function publicSiteDocument(doc) {
+    const value = publicDocument(doc);
+    if (!value) return null;
+    // Compatibilidad con clientes creados por learn.html (companyId) y por el
+    // CRM actual (empresaId). Entregables siempre consume empresaId.
+    value.empresaId = String(value.empresaId || value.companyId || '');
+    value.companyId = value.empresaId;
+    return value;
+}
+
 // mongodb-driver v5 devuelve { value }, mientras que v6 devuelve el documento.
 function resultValue(result) {
     if (!result) return null;
@@ -571,7 +660,7 @@ function emitTicket(event, ticket) {
 app.get('/api/sites', async (req, res) => {
     try {
         const sites = await dbCollection('sites').find({}).sort({ nombre: 1 }).toArray();
-        res.json(sites.map(publicDocument));
+        res.json(sites.map(publicSiteDocument));
     } catch (error) {
         res.status(500).json({ error: `No se pudieron obtener los clientes: ${error.message}` });
     }
@@ -613,12 +702,13 @@ app.get('/api/tickets/:siteId', async (req, res) => {
 // POST /api/tickets — crear entregable con fotos y firmas
 app.post('/api/tickets', uploadEntregables.array('fotos', 15), async (req, res) => {
     try {
-        const { siteId, folio, nombreTrabajo, descripcion, vendedor = '', ordenCompra = '', nombreTecnico = '', empresaId = '', firmaTecnico = '', firmaCliente = '' } = req.body;
+        const { siteId, folio, nombreTrabajo, descripcion, vendedor = '', ordenCompra = '', nombreTecnico = '', empresaId = '', firmaTecnico = '', firmaCliente = '', cotizacionId = '' } = req.body;
         if (!siteId || !folio || !nombreTrabajo || !descripcion) {
             return res.status(400).json({ error: 'siteId, folio, nombreTrabajo y descripcion son requeridos' });
         }
 
         const site = await dbCollection('sites').findOne(idFilter(siteId));
+        if (!site) return res.status(404).json({ error: 'El cliente seleccionado ya no existe.' });
         const now = new Date();
         const ticket = {
             _id: new mongoose.Types.ObjectId().toString(),
@@ -631,9 +721,12 @@ app.post('/api/tickets', uploadEntregables.array('fotos', 15), async (req, res) 
             vendedor: String(vendedor),
             ordenCompra: String(ordenCompra),
             nombreTecnico: String(nombreTecnico),
-            empresaId: empresaId ? String(empresaId) : '',
+            // Si no se escogió una empresa manualmente, se toma la empresa
+            // ligada al cliente para que el PDF tenga el encabezado correcto.
+            empresaId: empresaId ? String(empresaId) : String(site.empresaId || site.companyId || ''),
             firmaTecnico: firmaTecnico || '',
             firmaCliente: firmaCliente || '',
+            cotizacionId: cotizacionId ? String(cotizacionId) : '',
             fotos: uploadedPhotos(req.files),
             estado: 'terminado',
             createdAt: now,
@@ -777,10 +870,11 @@ app.post('/api/ticket/single/:id/download-pdf', async (req, res) => {
             site = await dbCollection('sites').findOne(idFilter(ticket.siteId));
         }
         let company = null;
-        if (site && site.empresaId) {
-            company = await dbCollection('companies').findOne(idFilter(site.empresaId));
+        const empresaId = site?.empresaId || site?.companyId || ticket.empresaId;
+        if (empresaId) {
+            company = await dbCollection('companies').findOne(idFilter(empresaId));
         }
-        res.json({ ticket: publicDocument(ticket), site: publicDocument(site), company: publicDocument(company), descargasRestantes: newCount });
+        res.json({ ticket: publicDocument(ticket), site: publicSiteDocument(site), company: publicDocument(company), descargasRestantes: newCount });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
