@@ -54,7 +54,7 @@ app.use('/api/email', (req, res, next) => {
 // MONGODB — Misma base de datos que server_2.js
 // ─────────────────────────────────────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI ||
-    'mongodb+srv://jairanaisata_db_user:Hola2025@cluster0.bpnkdj6.mongodb.net/naisata_db?appName=Cluster0';
+    'mongodb+srv://jarvis:Hola2025@cluster0.jih3lub.mongodb.net/naisata_db?appName=Cluster0';
 
 mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 10000,
@@ -702,7 +702,7 @@ app.get('/api/tickets/:siteId', async (req, res) => {
 // POST /api/tickets — crear entregable con fotos y firmas
 app.post('/api/tickets', uploadEntregables.array('fotos', 15), async (req, res) => {
     try {
-        const { siteId, folio, nombreTrabajo, descripcion, vendedor = '', ordenCompra = '', nombreTecnico = '', empresaId = '', firmaTecnico = '', firmaCliente = '', cotizacionId = '' } = req.body;
+        const { siteId, proyectoId = '', folio, nombreTrabajo, descripcion, vendedor = '', ordenCompra = '', nombreTecnico = '', empresaId = '', firmaTecnico = '', firmaCliente = '', cotizacionId = '' } = req.body;
         if (!siteId || !folio || !nombreTrabajo || !descripcion) {
             return res.status(400).json({ error: 'siteId, folio, nombreTrabajo y descripcion son requeridos' });
         }
@@ -713,6 +713,7 @@ app.post('/api/tickets', uploadEntregables.array('fotos', 15), async (req, res) 
         const ticket = {
             _id: new mongoose.Types.ObjectId().toString(),
             siteId: String(siteId),
+            proyectoId: String(proyectoId),
             nombreCliente: site?.nombre || '',
             folio: String(folio),
             nombreTrabajo: String(nombreTrabajo),
