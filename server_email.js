@@ -54,7 +54,7 @@ app.use('/api/email', (req, res, next) => {
 // MONGODB — Misma base de datos que server_2.js
 // ─────────────────────────────────────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI ||
-    'mongodb+srv://jarvis:Hola2025@cluster0.jih3lub.mongodb.net/naisata_db?appName=Cluster0';
+    'mongodb+srv://jairanaisata_db_user:Hola2025@cluster0.bpnkdj6.mongodb.net/naisata_db?appName=Cluster0';
 
 mongoose.connect(MONGODB_URI, {
     serverSelectionTimeoutMS: 10000,
