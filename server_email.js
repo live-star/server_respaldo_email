@@ -691,7 +691,7 @@ app.get('/api/tickets/full/:id', async (req, res) => {
 app.get('/api/tickets/:siteId', async (req, res) => {
     try {
         const tickets = await dbCollection('tickets')
-            .find({ siteId: { $in: idCandidates(req.params.siteId) } }, { allowDiskUse: true }).sort({ createdAt: -1, _id: -1 })
+            .find({ siteId: { $in: idCandidates(req.params.siteId) } }, { projection: { fotos: 0 }, allowDiskUse: true }).sort({ createdAt: -1, _id: -1 })
             .toArray();
         res.json(tickets.map(publicDocument));
     } catch (error) {
