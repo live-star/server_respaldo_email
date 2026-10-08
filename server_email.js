@@ -735,6 +735,29 @@ function parseActa(raw) {
     return acta;
 }
 
+const normalizeName = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+
+// Resuelve el cliente del entregable: primero por id; si el id no existe o no llegó,
+// por el nombre del cliente (coincidencia exacta normalizada y, si no, única coincidencia parcial).
+async function resolveSite(siteId, nombres = []) {
+    if (siteId) {
+        const byId = await dbCollection('sites').findOne(idFilter(siteId));
+        if (byId) return byId;
+    }
+    const wanted = nombres.map(normalizeName).filter(Boolean);
+    if (!wanted.length) return null;
+    const sites = await dbCollection('sites').find({}, { projection: { nombre: 1, empresaId: 1, companyId: 1 } }).toArray();
+    for (const name of wanted) {
+        const exact = sites.find(site => normalizeName(site.nombre) === name);
+        if (exact) return exact;
+    }
+    for (const name of wanted) {
+        const partial = sites.filter(site => { const n = normalizeName(site.nombre); return n && (n.includes(name) || name.includes(n)); });
+        if (partial.length === 1) return partial[0];
+    }
+    return null;
+}
+
 function emitTicket(event, ticket) {
     try { io.emit(event, publicDocument(ticket)); } catch (_) { /* Socket opcional */ }
 }
@@ -785,19 +808,23 @@ app.get('/api/tickets/:siteId', async (req, res) => {
 // POST /api/tickets — crear entregable con fotos y firmas
 app.post('/api/tickets', uploadEntregables.array('fotos', 15), async (req, res) => {
     try {
-        const { siteId, proyectoId = '', folio, nombreTrabajo, descripcion, vendedor = '', ordenCompra = '', nombreTecnico = '', empresaId = '', firmaTecnico = '', firmaCliente = '', cotizacionId = '' } = req.body;
-        if (!siteId || !folio || !nombreTrabajo || !descripcion) {
-            return res.status(400).json({ error: 'siteId, folio, nombreTrabajo y descripcion son requeridos' });
+        const { siteId = '', proyectoId = '', folio, nombreTrabajo, descripcion, vendedor = '', ordenCompra = '', nombreTecnico = '', empresaId = '', firmaTecnico = '', firmaCliente = '', cotizacionId = '', clienteNombre = '', clienteCotizacion = '' } = req.body;
+        if ((!siteId && !clienteNombre && !clienteCotizacion) || !folio || !nombreTrabajo || !descripcion) {
+            return res.status(400).json({ error: 'cliente, folio, nombreTrabajo y descripcion son requeridos' });
         }
 
-        const site = await dbCollection('sites').findOne(idFilter(siteId));
+        // El cliente llega por id (select) y, como respaldo, por nombre para que siempre
+        // quede ligado al mismo cliente que se ve en Entregables.
+        const site = await resolveSite(siteId, [clienteNombre, clienteCotizacion]);
         if (!site) return res.status(404).json({ error: 'El cliente seleccionado ya no existe.' });
+        const resolvedSiteId = String(site.id || site._id);
         const now = new Date();
         const ticket = {
             _id: new mongoose.Types.ObjectId().toString(),
-            siteId: String(siteId),
+            siteId: resolvedSiteId,
             proyectoId: String(proyectoId),
             nombreCliente: site?.nombre || '',
+            clienteCotizacion: String(clienteCotizacion || '').slice(0, 180),
             folio: String(folio),
             nombreTrabajo: String(nombreTrabajo),
             titulo: String(nombreTrabajo),
