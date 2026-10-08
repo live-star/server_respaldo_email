@@ -10,6 +10,7 @@ const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 const nodemailer = require('nodemailer');
 
+const fs = require('fs');
 const path = require('path');
 
 const app = express();
@@ -31,13 +32,17 @@ app.use(express.json({ limit: '50mb' }));
 // SERVIR ARCHIVOS FRONTEND (Para https://em.naisata.com)
 // ─────────────────────────────────────────────────────────────────────────────
 const parentDir = path.join(__dirname, '..');
-app.get('/', (req, res) => res.sendFile(path.join(parentDir, 'em.html')));
-app.get('/em.html', (req, res) => res.sendFile(path.join(parentDir, 'em.html')));
-app.get('/correo.css', (req, res) => res.sendFile(path.join(parentDir, 'correo.css')));
-app.get('/correo.js', (req, res) => res.sendFile(path.join(parentDir, 'correo.js')));
-app.get('/entregables.html', (req, res) => res.sendFile(path.join(parentDir, 'entregables.html')));
-app.get('/entregables.css', (req, res) => res.sendFile(path.join(parentDir, 'entregables.css')));
-app.get('/entregables.js', (req, res) => res.sendFile(path.join(parentDir, 'entregables.js')));
+// Los archivos del frontend solo existen en el equipo local. En Render no están,
+// así que si faltan se responde 404 limpio en lugar de lanzar ENOENT en los logs.
+function sendFrontend(fileName) {
+    return (req, res) => {
+        const file = [parentDir, __dirname].map(dir => path.join(dir, fileName)).find(candidate => fs.existsSync(candidate));
+        if (!file) return res.status(404).json({ ok: false, error: `${fileName} no está disponible en este servidor` });
+        res.sendFile(file);
+    };
+}
+app.get('/', sendFrontend('em.html'));
+['em.html', 'correo.css', 'correo.js', 'entregables.html', 'entregables.css', 'entregables.js'].forEach(fileName => app.get(`/${fileName}`, sendFrontend(fileName)));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SEGURIDAD API (Validar token de CRM)
