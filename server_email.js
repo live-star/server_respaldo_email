@@ -304,6 +304,41 @@ function obtenerCuerpoCorreo(imap, carpeta, uid) {
     });
 }
 
+/**
+ * Obtiene un adjunto puntual (con su contenido binario) de un correo por UID + índice.
+ */
+function obtenerAdjuntoCorreo(imap, carpeta, uid, index) {
+    return new Promise(async (resolve, reject) => {
+        try { await abrirCarpeta(imap, carpeta); }
+        catch (err) { return reject(err); }
+        try {
+            const f = imap.fetch([uid], { bodies: '', markSeen: false });
+            let raw = Buffer.alloc(0);
+
+            f.on('message', (msg) => {
+                msg.on('body', (stream) => {
+                    const chunks = [];
+                    stream.on('data', (chunk) => chunks.push(chunk));
+                    stream.once('end', () => { raw = Buffer.concat(chunks); });
+                });
+            });
+            f.once('error', reject);
+            f.once('end', async () => {
+                try {
+                    const parsed = await simpleParser(raw);
+                    const adjunto = (parsed.attachments || [])[index];
+                    if (!adjunto) return resolve(null);
+                    resolve({
+                        filename:    adjunto.filename || `adjunto-${index}`,
+                        contentType: adjunto.contentType || 'application/octet-stream',
+                        content:     adjunto.content, // Buffer
+                    });
+                } catch(e) { reject(e); }
+            });
+        } catch(e) { reject(e); }
+    });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RUTAS — CUENTAS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -427,6 +462,31 @@ app.get('/api/email/correo/:id/:uid', async (req, res) => {
         const correo = await obtenerCuerpoCorreo(imap, carpeta, uid);
         imap.end();
         res.json({ ok: true, correo });
+    } catch(e) {
+        if (imap) try { imap.end(); } catch(_) {}
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+// GET /api/email/correo/:id/:uid/adjunto/:index?carpeta=INBOX — descargar un adjunto
+app.get('/api/email/correo/:id/:uid/adjunto/:index', async (req, res) => {
+    let imap;
+    try {
+        const cuenta = await EmailCuenta.findById(req.params.id);
+        if (!cuenta) return res.status(404).json({ ok: false, error: 'Cuenta no encontrada' });
+        const uid = parseInt(req.params.uid);
+        const index = parseInt(req.params.index);
+        const carpeta = req.query.carpeta || 'INBOX';
+        imap = await abrirImap(cuenta);
+        const adjunto = await obtenerAdjuntoCorreo(imap, carpeta, uid, index);
+        imap.end();
+        if (!adjunto) return res.status(404).json({ ok: false, error: 'Adjunto no encontrado' });
+        res.json({
+            ok: true,
+            nombre: adjunto.filename,
+            tipo: adjunto.contentType,
+            contenido: adjunto.content.toString('base64'),
+        });
     } catch(e) {
         if (imap) try { imap.end(); } catch(_) {}
         res.status(500).json({ ok: false, error: e.message });
@@ -652,6 +712,24 @@ function uploadedPhotos(files = []) {
         .map(file => `data:${file.mimetype || 'image/jpeg'};base64,${file.buffer.toString('base64')}`);
 }
 
+// Datos del acta de entrega (PDF): texto plano + información por foto (fotosInfo, alineada con `fotos`).
+function parseActa(raw) {
+    let data;
+    try { data = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_) { return null; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    const acta = {};
+    Object.keys(data).slice(0, 60).forEach(key => {
+        if (key === 'fotosInfo' || key.startsWith('$') || key.includes('.')) return;
+        if (typeof data[key] === 'string') acta[key] = data[key].slice(0, 1500);
+    });
+    acta.fotosInfo = (Array.isArray(data.fotosInfo) ? data.fotosInfo : []).slice(0, 100).map(info => ({
+        descripcion: String(info?.descripcion ?? '').slice(0, 200),
+        fecha: String(info?.fecha ?? '').slice(0, 10),
+        ubicacion: String(info?.ubicacion ?? '').slice(0, 100),
+    }));
+    return acta;
+}
+
 function emitTicket(event, ticket) {
     try { io.emit(event, publicDocument(ticket)); } catch (_) { /* Socket opcional */ }
 }
@@ -733,6 +811,8 @@ app.post('/api/tickets', uploadEntregables.array('fotos', 15), async (req, res) 
             createdAt: now,
             updatedAt: now,
         };
+        const acta = parseActa(req.body.datosActa);
+        if (acta) ticket.datosActa = acta;
         await dbCollection('tickets').insertOne(ticket);
         emitTicket('new_ticket', ticket);
         res.status(201).json(publicDocument(ticket));
@@ -749,6 +829,8 @@ app.put('/api/tickets/:id', uploadEntregables.none(), async (req, res) => {
             return res.status(400).json({ error: 'folio, nombreTrabajo y descripcion son requeridos' });
         }
         const patch = { folio: String(folio), nombreTrabajo: String(nombreTrabajo), titulo: String(nombreTrabajo), descripcion: String(descripcion), vendedor: String(vendedor), ordenCompra: String(ordenCompra), nombreTecnico: String(nombreTecnico), updatedAt: new Date() };
+        const acta = parseActa(req.body.datosActa);
+        if (acta) patch.datosActa = acta;
         if (siteId) {
             const site = await dbCollection('sites').findOne(idFilter(siteId));
             patch.siteId = String(siteId);
@@ -806,7 +888,13 @@ app.delete('/api/tickets/:id/photos/:index', async (req, res) => {
             return res.status(400).json({ error: 'Índice de foto inválido' });
         }
         const fotos = [...ticket.fotos]; fotos.splice(index, 1);
-        const result = await dbCollection('tickets').findOneAndUpdate(idFilter(req.params.id), { $set: { fotos, updatedAt: new Date() } }, { returnDocument: 'after' });
+        const patch = { fotos, updatedAt: new Date() };
+        if (Array.isArray(ticket.datosActa?.fotosInfo)) {
+            const fotosInfo = [...ticket.datosActa.fotosInfo];
+            if (index < fotosInfo.length) fotosInfo.splice(index, 1);
+            patch['datosActa.fotosInfo'] = fotosInfo;
+        }
+        const result = await dbCollection('tickets').findOneAndUpdate(idFilter(req.params.id), { $set: patch }, { returnDocument: 'after' });
         const updated = resultValue(result);
         emitTicket('ticket_updated', updated);
         res.json(publicDocument(updated));
